@@ -10,6 +10,10 @@
 #include "distributed_context.hpp"
 #include "worker_server.hpp"
 
+#include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
@@ -363,6 +367,114 @@ vector<NodeExecResult> DistributedContext::ExecAllNodes(const string &sql) {
 		results.push_back(f.get());
 	}
 	return results;
+}
+
+//===--------------------------------------------------------------------===//
+// Distributed table registry
+//===--------------------------------------------------------------------===//
+
+void DistributedContext::RegisterTable(const string &table_name, const string &shard_key, int32_t num_shards) {
+	std::lock_guard<std::mutex> lock(tables_mutex);
+	// Replace if already registered.
+	for (auto &meta : distributed_tables) {
+		if (meta.table_name == table_name) {
+			meta.shard_key = shard_key;
+			meta.num_shards = num_shards;
+			return;
+		}
+	}
+	DistributedTableMeta meta;
+	meta.table_name = table_name;
+	meta.shard_key = shard_key;
+	meta.num_shards = num_shards;
+	distributed_tables.push_back(std::move(meta));
+}
+
+void DistributedContext::UnregisterTable(const string &table_name) {
+	std::lock_guard<std::mutex> lock(tables_mutex);
+	distributed_tables.erase(
+	    std::remove_if(distributed_tables.begin(), distributed_tables.end(),
+	                   [&](const DistributedTableMeta &m) { return m.table_name == table_name; }),
+	    distributed_tables.end());
+}
+
+bool DistributedContext::IsDistributedTable(const string &table_name) const {
+	std::lock_guard<std::mutex> lock(tables_mutex);
+	for (auto &meta : distributed_tables) {
+		if (meta.table_name == table_name) {
+			return true;
+		}
+	}
+	return false;
+}
+
+vector<DistributedTableMeta> DistributedContext::GetDistributedTables() const {
+	std::lock_guard<std::mutex> lock(tables_mutex);
+	return distributed_tables;
+}
+
+//! Simple FNV-1a hash used for shard routing.
+static uint64_t FNV1aHash(const string &str) {
+	uint64_t hash = 14695981039346656037ULL;
+	for (unsigned char c : str) {
+		hash ^= static_cast<uint64_t>(c);
+		hash *= 1099511628211ULL;
+	}
+	return hash;
+}
+
+DistributedNode DistributedContext::GetShardNode(const string &table_name,
+                                                  const string &shard_key_value) const {
+	auto nodes_snapshot = GetNodes();
+	if (nodes_snapshot.empty()) {
+		return {"", -1};
+	}
+
+	// Find table metadata.
+	{
+		std::lock_guard<std::mutex> lock(tables_mutex);
+		for (auto &meta : distributed_tables) {
+			if (meta.table_name == table_name && meta.num_shards > 0) {
+				idx_t shard = FNV1aHash(shard_key_value) % static_cast<uint64_t>(nodes_snapshot.size());
+				return nodes_snapshot[shard];
+			}
+		}
+	}
+
+	// Table not found or no sharding — return first node as fallback.
+	return nodes_snapshot[0];
+}
+
+//===--------------------------------------------------------------------===//
+// Replacement scan
+// Called by DuckDB whenever a table name cannot be resolved in the catalog.
+// If the name matches a registered distributed table we return a
+// TableFunctionRef to distributed_query('SELECT * FROM <table>') so that
+// the rest of the query planner treats it like a normal table.
+//===--------------------------------------------------------------------===//
+
+unique_ptr<TableRef> DistributedContext::ReplacementScan(ClientContext &context, ReplacementScanInput &input,
+                                                          optional_ptr<ReplacementScanData> data) {
+	auto &table_name = input.table_name;
+
+	// Quick rejection: only intercept names registered as distributed tables.
+	auto &ctx = DistributedContext::Get();
+	if (!ctx.IsDistributedTable(table_name)) {
+		return nullptr;
+	}
+
+	// No nodes → don't intercept (fall through to regular error).
+	if (ctx.GetNodes().empty()) {
+		return nullptr;
+	}
+
+	// Build: distributed_query('SELECT * FROM "<table_name>"')
+	auto table_function = make_uniq<TableFunctionRef>();
+	vector<unique_ptr<ParsedExpression>> children;
+	string query = "SELECT * FROM \"" + table_name + "\"";
+	children.push_back(make_uniq<ConstantExpression>(Value(query)));
+	table_function->function = make_uniq<FunctionExpression>("distributed_query", std::move(children));
+	return table_function;
 }
 
 //===--------------------------------------------------------------------===//
