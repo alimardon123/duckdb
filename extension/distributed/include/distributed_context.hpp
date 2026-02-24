@@ -35,7 +35,7 @@ struct DistributedNode {
 	}
 };
 
-//! Result of executing a query on a single worker node.
+//! Result of executing a SELECT (or schema-probe) query on a single worker node.
 struct NodeQueryResult {
 	bool success = false;
 	string error;
@@ -50,6 +50,21 @@ struct NodeQueryResult {
 		vector<bool> is_null;  //! True for NULL cells.
 	};
 	vector<Row> rows;
+
+	//! The node this result came from (filled in by QueryAllNodes / ExecAllNodes).
+	DistributedNode node;
+};
+
+//! Result of executing a DML/DDL statement on a single worker node.
+//! DuckDB returns a "Count" column for INSERT/UPDATE/DELETE.
+struct NodeExecResult {
+	//! The node this result came from.
+	DistributedNode node;
+	bool success = false;
+	//! Number of rows affected (populated for INSERT/UPDATE/DELETE).
+	int64_t rows_affected = 0;
+	//! Error message when success == false.
+	string error;
 };
 
 //! Global singleton that tracks the cluster state for this DuckDB process.
@@ -68,7 +83,10 @@ public:
 	//! Return a snapshot of all registered nodes.
 	vector<DistributedNode> GetNodes() const;
 
-	//! Start a local TCP worker server on the given port. Fails if already running.
+	//! Start a local TCP worker server on the given port.
+	//! Automatically registers 127.0.0.1:port as a node so this instance
+	//! participates in distributed queries as both coordinator and worker.
+	//! Fails if a worker is already running.
 	void StartWorker(DatabaseInstance &db, int32_t port);
 
 	//! Stop the local worker server if running.
@@ -80,11 +98,27 @@ public:
 	//! Returns the port of the running worker server, or -1.
 	int32_t GetWorkerPort() const;
 
+	// -----------------------------------------------------------------------
+	// SELECT / schema queries  (fan-out, union results)
+	// -----------------------------------------------------------------------
+
 	//! Execute a query on a specific node and return the result.
 	NodeQueryResult QueryNode(const DistributedNode &node, const string &query);
 
-	//! Execute a query on every registered node and return a result per node.
+	//! Execute a query on every registered node IN PARALLEL and return one
+	//! result per node (in registration order).
 	vector<NodeQueryResult> QueryAllNodes(const string &query);
+
+	// -----------------------------------------------------------------------
+	// DML / DDL execution  (broadcast writes)
+	// -----------------------------------------------------------------------
+
+	//! Execute a DML/DDL statement on a specific node and return the exec result.
+	NodeExecResult ExecNode(const DistributedNode &node, const string &sql);
+
+	//! Execute a DML/DDL statement on every registered node IN PARALLEL and
+	//! return one NodeExecResult per node.
+	vector<NodeExecResult> ExecAllNodes(const string &sql);
 
 private:
 	mutable std::mutex nodes_mutex;

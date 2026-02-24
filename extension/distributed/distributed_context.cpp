@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstring>
+#include <future>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <stdexcept>
@@ -61,13 +62,19 @@ vector<DistributedNode> DistributedContext::GetNodes() const {
 //===--------------------------------------------------------------------===//
 
 void DistributedContext::StartWorker(DatabaseInstance &db, int32_t port) {
-	std::lock_guard<std::mutex> lock(nodes_mutex);
-	if (worker_server) {
-		throw std::runtime_error("A worker server is already running on port " + to_string(worker_server->GetPort()));
+	{
+		std::lock_guard<std::mutex> lock(nodes_mutex);
+		if (worker_server) {
+			throw std::runtime_error("A worker server is already running on port " +
+			                         to_string(worker_server->GetPort()));
+		}
+		auto srv = make_uniq<WorkerServer>(db, port);
+		srv->Start();
+		worker_server = std::move(srv);
 	}
-	auto srv = make_uniq<WorkerServer>(db, port);
-	srv->Start();
-	worker_server = std::move(srv);
+	// Auto-register self so this instance participates in distributed_query /
+	// distributed_exec as both coordinator and worker.
+	AddNode("127.0.0.1", port);
 }
 
 void DistributedContext::StopWorker() {
@@ -282,10 +289,78 @@ vector<NodeQueryResult> DistributedContext::QueryAllNodes(const string &query) {
 		throw InvalidInputException("No distributed nodes registered. Use distributed_add_node() first.");
 	}
 
-	vector<NodeQueryResult> results;
-	results.reserve(snapshot.size());
+	// Fire all node queries in parallel.
+	vector<std::future<NodeQueryResult>> futures;
+	futures.reserve(snapshot.size());
 	for (auto &node : snapshot) {
-		results.push_back(QueryNode(node, query));
+		futures.push_back(std::async(std::launch::async, [this, node, query]() {
+			NodeQueryResult r = QueryNode(node, query);
+			r.node = node;
+			return r;
+		}));
+	}
+
+	vector<NodeQueryResult> results;
+	results.reserve(futures.size());
+	for (auto &f : futures) {
+		results.push_back(f.get());
+	}
+	return results;
+}
+
+//===--------------------------------------------------------------------===//
+// DML / DDL broadcast  (ExecNode / ExecAllNodes)
+//===--------------------------------------------------------------------===//
+
+//! Parse rows_affected out of a DML NodeQueryResult.
+//! DuckDB returns a single "Count" BIGINT column for INSERT/UPDATE/DELETE.
+static int64_t ExtractRowsAffected(const NodeQueryResult &nr) {
+	if (!nr.success || nr.rows.empty()) {
+		return 0;
+	}
+	if (nr.col_names.size() == 1) {
+		const string &col = nr.col_names[0];
+		if (col == "Count" || col == "count" || col == "rows_affected") {
+			try {
+				return std::stoll(nr.rows[0].values[0]);
+			} catch (...) {
+			}
+		}
+	}
+	// DDL (CREATE/DROP/ALTER) or unknown – return row count as proxy.
+	return static_cast<int64_t>(nr.rows.size());
+}
+
+NodeExecResult DistributedContext::ExecNode(const DistributedNode &node, const string &sql) {
+	NodeExecResult result;
+	result.node = node;
+
+	NodeQueryResult qr = QueryNode(node, sql);
+	result.success = qr.success;
+	result.error = qr.error;
+	result.rows_affected = ExtractRowsAffected(qr);
+	return result;
+}
+
+vector<NodeExecResult> DistributedContext::ExecAllNodes(const string &sql) {
+	auto snapshot = GetNodes();
+	if (snapshot.empty()) {
+		throw InvalidInputException("No distributed nodes registered. Use distributed_add_node() first.");
+	}
+
+	// Fire all exec calls in parallel.
+	vector<std::future<NodeExecResult>> futures;
+	futures.reserve(snapshot.size());
+	for (auto &node : snapshot) {
+		futures.push_back(std::async(std::launch::async, [this, node, sql]() {
+			return ExecNode(node, sql);
+		}));
+	}
+
+	vector<NodeExecResult> results;
+	results.reserve(futures.size());
+	for (auto &f : futures) {
+		results.push_back(f.get());
 	}
 	return results;
 }
