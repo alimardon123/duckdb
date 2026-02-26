@@ -1,7 +1,7 @@
 //===----------------------------------------------------------------------===//
 // mwdb_pk_index.cpp  –  Optional global PK index implementation
 //===----------------------------------------------------------------------===//
-#include "mwdb_pk_index.hpp"
+#include "duckdb/storage/multifile/mwdb_pk_index.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -115,18 +115,19 @@ void MWDBPKIndex::RemoveSegment(uint32_t seg_idx) {
     // Still sorted after removal (we only removed elements, not reordered).
 }
 
-std::optional<std::pair<uint32_t,uint32_t>>
+MWDBOptional<std::pair<uint32_t,uint32_t>>
 MWDBPKIndex::Lookup(const std::vector<uint8_t> &key) const {
-    if (!has_index_ || entries_.empty()) return std::nullopt;
+    if (!has_index_ || entries_.empty()) return MWDBOptional<std::pair<uint32_t,uint32_t>>();
 
     // Binary search: create a dummy entry to compare
     MWDBPKEntry target;
     target.key_bytes = key;
     auto it = std::lower_bound(entries_.begin(), entries_.end(), target);
     if (it != entries_.end() && it->key_bytes == key) {
-        return std::make_pair(it->segment_idx, it->row_pos);
+        return MWDBOptional<std::pair<uint32_t,uint32_t>>(
+            std::make_pair(it->segment_idx, it->row_pos));
     }
-    return std::nullopt;
+    return MWDBOptional<std::pair<uint32_t,uint32_t>>();
 }
 
 std::vector<const MWDBPKEntry*>

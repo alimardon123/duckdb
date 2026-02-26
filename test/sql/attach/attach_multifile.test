@@ -1,0 +1,172 @@
+# name: test/sql/attach/attach_multifile.test
+# description: Native multi-writer storage — ATTACH (TYPE multifile)
+# group: [attach]
+
+require parquet
+
+# -------------------------------------------------------
+# 1. Create a new multifile database
+# -------------------------------------------------------
+
+statement ok
+ATTACH '__TEST_DIR__/mf_test.duckdb' AS mf (TYPE multifile);
+
+# -------------------------------------------------------
+# 2. Create a table
+# -------------------------------------------------------
+
+statement ok
+CREATE TABLE mf.orders (id INTEGER, amount DOUBLE, label VARCHAR);
+
+# -------------------------------------------------------
+# 3. Insert rows
+# -------------------------------------------------------
+
+statement ok
+INSERT INTO mf.orders VALUES (1, 10.5, 'alpha'),
+                              (2, 20.0, 'beta'),
+                              (3, 30.75, 'gamma');
+
+# -------------------------------------------------------
+# 4. Query the table
+# -------------------------------------------------------
+
+query III
+SELECT id, amount, label FROM mf.orders ORDER BY id;
+----
+1	10.5	alpha
+2	20.0	beta
+3	30.75	gamma
+
+# -------------------------------------------------------
+# 5. Checkpoint writes Parquet + updates _index.bin
+# -------------------------------------------------------
+
+statement ok
+CHECKPOINT mf;
+
+# -------------------------------------------------------
+# 6. Verify _index.bin was written to disk
+# -------------------------------------------------------
+
+query I
+SELECT COUNT(*) > 0 FROM glob('__TEST_DIR__/mf_test.duckdb/_index.bin');
+----
+true
+
+# -------------------------------------------------------
+# 7. Verify a Parquet segment was written
+# -------------------------------------------------------
+
+query I
+SELECT COUNT(*) > 0 FROM glob('__TEST_DIR__/mf_test.duckdb/_data/orders/*.parquet');
+----
+true
+
+# -------------------------------------------------------
+# 8. Detach and re-attach — data must survive
+# -------------------------------------------------------
+
+statement ok
+DETACH mf;
+
+statement ok
+ATTACH '__TEST_DIR__/mf_test.duckdb' AS mf (TYPE multifile);
+
+query III
+SELECT id, amount, label FROM mf.orders ORDER BY id;
+----
+1	10.5	alpha
+2	20.0	beta
+3	30.75	gamma
+
+# -------------------------------------------------------
+# 9. Additional inserts after re-attach
+# -------------------------------------------------------
+
+statement ok
+INSERT INTO mf.orders VALUES (4, 40.0, 'delta');
+
+query I
+SELECT COUNT(*) FROM mf.orders;
+----
+4
+
+# -------------------------------------------------------
+# 10. Checkpoint again and verify row count via Parquet
+# -------------------------------------------------------
+
+statement ok
+CHECKPOINT mf;
+
+query I
+SELECT COUNT(*) FROM read_parquet('__TEST_DIR__/mf_test.duckdb/_data/orders/*.parquet');
+----
+4
+
+# -------------------------------------------------------
+# 11. Multi-table support
+# -------------------------------------------------------
+
+statement ok
+CREATE TABLE mf.users (user_id BIGINT, name VARCHAR);
+
+statement ok
+INSERT INTO mf.users VALUES (100, 'alice'), (200, 'bob');
+
+query II
+SELECT user_id, name FROM mf.users ORDER BY user_id;
+----
+100	alice
+200	bob
+
+statement ok
+CHECKPOINT mf;
+
+statement ok
+DETACH mf;
+
+# Re-attach and verify both tables
+statement ok
+ATTACH '__TEST_DIR__/mf_test.duckdb' AS mf (TYPE multifile);
+
+query III
+SELECT id, amount, label FROM mf.orders ORDER BY id;
+----
+1	10.5	alpha
+2	20.0	beta
+3	30.75	gamma
+4	40.0	delta
+
+query II
+SELECT user_id, name FROM mf.users ORDER BY user_id;
+----
+100	alice
+200	bob
+
+# -------------------------------------------------------
+# 12. DELETE works (in-memory, visible before checkpoint)
+# -------------------------------------------------------
+
+statement ok
+DELETE FROM mf.orders WHERE id = 2;
+
+query I
+SELECT COUNT(*) FROM mf.orders;
+----
+3
+
+# -------------------------------------------------------
+# 13. UPDATE works
+# -------------------------------------------------------
+
+statement ok
+UPDATE mf.orders SET amount = 99.9 WHERE id = 1;
+
+query I
+SELECT amount FROM mf.orders WHERE id = 1;
+----
+99.9
+
+statement ok
+DETACH mf;

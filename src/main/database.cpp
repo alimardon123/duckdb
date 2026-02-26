@@ -34,6 +34,7 @@
 #include "duckdb/storage/standard_buffer_manager.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/multifile/multifile_storage.hpp"
 #include "duckdb/transaction/transaction_manager.hpp"
 #include "mbedtls_wrapper.hpp"
 
@@ -57,6 +58,8 @@ DBConfig::DBConfig() {
 	http_util = make_shared_ptr<HTTPUtil>();
 	callback_manager = make_uniq<ExtensionCallbackManager>();
 	callback_manager->Register("__open_file__", OpenFileStorageExtension::Create());
+	// Built-in multi-writer storage: ATTACH 'path/' (TYPE multifile)
+	callback_manager->Register("multifile", MultifileStorageExtension::Create());
 }
 
 DBConfig::DBConfig(bool read_only) : DBConfig::DBConfig() {

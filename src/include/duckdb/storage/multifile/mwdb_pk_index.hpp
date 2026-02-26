@@ -1,6 +1,6 @@
 //===----------------------------------------------------------------------===//
 // mwdb_pk_index.hpp
-// Optional global primary-key index for the multi-writer DuckDB extension.
+// Optional global primary-key index for the multi-writer DuckDB storage.
 //
 // Maps primary-key byte sequences → (segment_index, row_position).
 // Stored as a sorted flat array in _index.bin so that lookup is O(log N)
@@ -18,9 +18,24 @@
 #include <cstdint>
 #include <vector>
 #include <string>
-#include <optional>
+#include <utility>
 
 namespace duckdb {
+
+//===--------------------------------------------------------------------===//
+// Lightweight optional (C++11 compatible, no Boost dependency)
+//===--------------------------------------------------------------------===//
+
+template <typename T>
+struct MWDBOptional {
+	bool has_value = false;
+	T    value {};
+
+	MWDBOptional() : has_value(false) {}
+	explicit MWDBOptional(T v) : has_value(true), value(std::move(v)) {}
+
+	explicit operator bool() const { return has_value; }
+};
 
 //===--------------------------------------------------------------------===//
 // Single entry in the sorted index
@@ -82,7 +97,7 @@ public:
 
     //------------------------------------------------------------------
     // Zero-overhead absent check
-    // When HasIndex() == false every lookup returns std::nullopt and
+    // When HasIndex() == false every lookup returns an empty optional and
     // every Insert() is a no-op. No iteration, no allocation.
     //------------------------------------------------------------------
     bool HasIndex() const { return has_index_; }
@@ -109,9 +124,9 @@ public:
     // Lookup
     //------------------------------------------------------------------
 
-    // Returns (segment_idx, row_pos) if found, else nullopt.
+    // Returns (segment_idx, row_pos) if found, else an empty optional.
     // O(log N) binary search — O(1) when HasIndex() == false.
-    std::optional<std::pair<uint32_t,uint32_t>>
+    MWDBOptional<std::pair<uint32_t,uint32_t>>
     Lookup(const std::vector<uint8_t> &key) const;
 
     // Range scan: all entries with key in [lo, hi] (inclusive).

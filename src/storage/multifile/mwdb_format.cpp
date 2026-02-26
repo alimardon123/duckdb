@@ -1,8 +1,8 @@
 //===----------------------------------------------------------------------===//
 // mwdb_format.cpp  –  _index.bin serialisation / deserialisation
 //===----------------------------------------------------------------------===//
-#include "mwdb_format.hpp"
-#include "mwdb_pk_index.hpp"
+#include "duckdb/storage/multifile/mwdb_format.hpp"
+#include "duckdb/storage/multifile/mwdb_pk_index.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/exception.hpp"

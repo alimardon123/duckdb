@@ -10,9 +10,9 @@
 //===----------------------------------------------------------------------===//
 #pragma once
 
-#include "duckdb.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/string.hpp"
 
 #include <cstdint>
 #include <string>
